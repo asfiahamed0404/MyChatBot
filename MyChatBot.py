@@ -1,10 +1,13 @@
 import streamlit as st
 from PyPDF2 import PdfReader
+from langchain_classic.chains.combine_documents import create_stuff_documents_chain
 from langchain_classic.chains.question_answering import load_qa_chain
 from langchain_community.chat_models import ChatOpenAI
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.embeddings import OpenAIEmbeddings
+from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
+from langchain.prompts import ChatPromptTemplate
 
 OpenAI_API_KEY = "REMOVED_REVOKED_OPENAI_API_KEY"
 
@@ -23,12 +26,15 @@ if file is not None:
     #st.write(text)
 
     #break into Chunks
-    splitter = RecursiveCharacterTextSplitter(chunk_size=300, chunk_overlap=50)
+    splitter = RecursiveCharacterTextSplitter(chunk_size=300, chunk_overlap=50, length_function=len)
     chunks = splitter.split_text(text)
     #st.write(chunks)
 
     #creating Object of OpenAIEmbeddings class that let us connect with OpenAI's Embedding Models
     embeddings = OpenAIEmbeddings(api_key=OpenAI_API_KEY)
+    """embeddings = HuggingFaceEmbeddings(
+        model_name="sentence-transformers/all-MiniLM-L6-v2"
+    )"""
 
     #Creating VectorDB & Storing embeddings into it
     vector_store = FAISS.from_texts(chunks, embeddings)
@@ -49,6 +55,18 @@ if file is not None:
             )
 
         #Generate Renponse
-        chain = load_qa_chain(llm, chain_type="stuff")    #stuff mean - pass it to llm which are query and similarity chunks
-        output = chain.run(question = user_query, documents = matching_chunks)
+        #chain = load_qa_chain(llm, chain_type="stuff")    #stuff mean - pass it to llm which are query and similarity chunks
+        #output = chain.run(question = user_query, input_documents = matching_chunks)
+        #st.write(output)
+
+        customized_prompt = ChatPromptTemplate.from_template(
+            """ You are my assistant tutor. Answer the question based on the following context and 
+            if you did not get the context simply say "I don't know Asfi" :
+            {context}
+            Question: {input}
+            """
+        )
+
+        chain = create_stuff_documents_chain(llm, customized_prompt)
+        output = chain.invoke({"input": user_query, "input_documents": matching_chunks})
         st.write(output)
