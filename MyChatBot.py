@@ -1,6 +1,10 @@
 import streamlit as st
 from PyPDF2 import PdfReader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_community.embeddings import OpenAIEmbeddings
+from langchain_community.vectorstores import FAISS
+
+OpenAI_API_KEY = "REMOVED_REVOKED_OPENAI_API_KEY"
 
 st.header("NoteBot")
 
@@ -17,6 +21,10 @@ if file is not None:
     st.write(text)
 
     #break into Chunks
-    splitter = RecursiveCharacterTextSplitter(separators=["\n"], chunk_size=250, chunk_overlap=50)
+    splitter = RecursiveCharacterTextSplitter(chunk_size=300, chunk_overlap=50)
     chunks = splitter.split_text(text)
-    st.write(chunks)
+    #st.write(chunks)
+
+    embeddings = OpenAIEmbeddings(api_key=OpenAI_API_KEY)
+
+    vector_store = FAISS.from_texts(chunks, embeddings)
