@@ -1,5 +1,6 @@
 import streamlit as st
 from PyPDF2 import PdfReader
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 st.header("NoteBot")
 
@@ -13,4 +14,9 @@ if file is not None:
     text=" "
     for page in my_pdf.pages:
         text += page.extract_text()
-        st.write(text)
+    st.write(text)
+
+    #break into Chunks
+    splitter = RecursiveCharacterTextSplitter(separators=["\n"], chunk_size=250, chunk_overlap=50)
+    chunks = splitter.split_text(text)
+    st.write(chunks)
