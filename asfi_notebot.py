@@ -13,7 +13,7 @@ import torch
 
 # --- PAGE CONFIG ---
 st.set_page_config(
-    page_title="NoteBot Intelligence",
+    page_title="Asfi’s NoteBot",
     page_icon="📚",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -166,8 +166,8 @@ col1, col2 = st.columns([1, 10])
 with col1:
     st.markdown('<span style="font-size: 4rem;">📚</span>', unsafe_allow_html=True)
 with col2:
-    st.markdown('<p class="app-title">NoteBot Intelligence</p>', unsafe_allow_html=True)
-    st.markdown('<p class="app-subtitle">Your AI-powered study companion • Upload PDFs and chat with your notes</p>', unsafe_allow_html=True)
+    st.markdown('<p class="app-title">Asfi’s NoteBot</p>', unsafe_allow_html=True)
+    st.markdown('<p class="app-subtitle">AI-powered PDF chat assistant built by Asfi Ahamed</p>', unsafe_allow_html=True)
 
 st.divider()
 
@@ -225,12 +225,12 @@ with st.sidebar:
     st.markdown("---")
     if FREE_MODE:
         st.markdown(
-            '<p style="text-align: center; font-size: 0.8rem; opacity: 0.5;">Powered by HuggingFace & LangChain</p>',
+            '<p style="text-align: center; font-size: 0.8rem; opacity: 0.5;">Built by Asfi Ahamed • Powered by HuggingFace & LangChain</p>',
             unsafe_allow_html=True
         )
     else:
         st.markdown(
-            '<p style="text-align: center; font-size: 0.8rem; opacity: 0.5;">Powered by OpenAI & LangChain</p>',
+            '<p style="text-align: center; font-size: 0.8rem; opacity: 0.5;">Built by Asfi Ahamed •Powered by OpenAI & LangChain</p>',
             unsafe_allow_html=True
         )
 
@@ -413,7 +413,7 @@ else:
         border: 1px solid rgba(255, 255, 255, 0.1);
         margin-top: 2rem;
     ">
-        <h2 style="font-size: 3rem; margin-bottom: 1rem;">👋 Welcome to NoteBot!</h2>
+        <h2 style="font-size: 3rem; margin-bottom: 1rem;">👋 Welcome to Asfi’s NoteBot!</h2>
         <p style="font-size: 1.2rem; opacity: 0.7; margin-bottom: 2rem;">
             Upload a PDF in the sidebar to start chatting with your notes
         </p>
