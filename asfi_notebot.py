@@ -1,15 +1,23 @@
+import hashlib
+import os
+from typing import Any, List, Optional
+
 import streamlit as st
-from PyPDF2 import PdfReader
+import torch
+from pypdf import PdfReader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
-from langchain_community.embeddings import HuggingFaceEmbeddings
-from langchain_community.llms import HuggingFaceHub
+from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_core.language_models.llms import LLM
+from streamlit.errors import StreamlitSecretNotFoundError
 from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
-from typing import Optional, List, Any
-import torch
+
+FREE_EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+FREE_CHAT_MODEL = "google/flan-t5-small"
+PAID_EMBEDDING_MODEL = "text-embedding-3-small"
+PAID_CHAT_MODEL = "gpt-4o-mini"
 
 # --- PAGE CONFIG ---
 st.set_page_config(
@@ -160,6 +168,41 @@ if "vector_store" not in st.session_state:
     st.session_state.vector_store = None
 if "current_file" not in st.session_state:
     st.session_state.current_file = None
+if "current_file_id" not in st.session_state:
+    st.session_state.current_file_id = None
+if "active_mode" not in st.session_state:
+    st.session_state.active_mode = None
+if "uploader_version" not in st.session_state:
+    st.session_state.uploader_version = 0
+
+
+def clear_document_state(clear_messages: bool = True) -> None:
+    """Clear the current document index and optionally its chat history."""
+    st.session_state.vector_store = None
+    st.session_state.current_file = None
+    st.session_state.current_file_id = None
+    if clear_messages:
+        st.session_state.messages = []
+
+
+def reset_chat() -> None:
+    st.session_state.messages = []
+    st.toast("Chat cleared!", icon="✨")
+
+
+def clear_uploaded_document() -> None:
+    clear_document_state()
+    st.session_state.uploader_version += 1
+    st.toast("Document cleared!", icon="🗑️")
+
+
+def handle_mode_change() -> None:
+    selected_mode = st.session_state.mode_selector
+    if st.session_state.active_mode != selected_mode:
+        clear_document_state()
+        st.session_state.uploader_version += 1
+        st.session_state.active_mode = selected_mode
+        st.toast("Mode changed. Upload the document again.", icon="🔄")
 
 # --- HEADER WITH LOGO ---
 col1, col2 = st.columns([1, 10])
@@ -171,16 +214,22 @@ with col2:
 
 st.divider()
 
-# --- FREE MODE TOGGLE ---
-# Set to True to use FREE HuggingFace models (no API costs)
-# Set to False to use OpenAI API (better quality, costs money)
-FREE_MODE = True
-#FREE_MODE = False
-
-
 # --- SIDEBAR ---
 with st.sidebar:
     st.markdown("### ⚙️ Mode")
+    selected_mode = st.radio(
+        "Choose how answers are generated",
+        options=("free", "paid"),
+        format_func=lambda mode: "🆓 Free — local models" if mode == "free" else "💳 Paid — OpenAI API",
+        label_visibility="collapsed",
+        key="mode_selector",
+        on_change=handle_mode_change,
+    )
+    FREE_MODE = selected_mode == "free"
+
+    if st.session_state.active_mode is None:
+        st.session_state.active_mode = selected_mode
+
     if FREE_MODE:
         st.success("🆓 FREE MODE - Using HuggingFace")
         st.caption("No API costs • Local models")
@@ -194,24 +243,25 @@ with st.sidebar:
     file = st.file_uploader(
         "Drop your PDF here",
         type="pdf",
-        help="Upload a lecture PDF to start chatting with your notes"
+        help="Upload a lecture PDF to start chatting with your notes",
+        key=f"pdf_uploader_{st.session_state.uploader_version}",
     )
     
     st.divider()
     
     # Reset Chat Button
-    if st.button("🔄 Reset Chat", use_container_width=True):
-        st.session_state.messages = []
-        st.toast("Chat cleared!", icon="✨")
-        st.rerun()
+    st.button(
+        "🔄 Reset Chat",
+        use_container_width=True,
+        on_click=reset_chat,
+    )
     
     # Clear Vector Store Button
-    if st.button("🗑️ Clear Document", use_container_width=True):
-        st.session_state.vector_store = None
-        st.session_state.current_file = None
-        st.session_state.messages = []
-        st.toast("Document cleared!", icon="🗑️")
-        st.rerun()
+    st.button(
+        "🗑️ Clear Document",
+        use_container_width=True,
+        on_click=clear_uploaded_document,
+    )
     
     st.divider()
     
@@ -235,53 +285,72 @@ with st.sidebar:
         )
 
 # --- HELPER FUNCTION: Get API Key ---
-def get_api_key():
-    """Retrieve OpenAI API key from Streamlit secrets"""
-    try:
-        return st.secrets["OPENAI_API_KEY"]
-    except KeyError:
-        st.error("""
-        ⚠️ **OpenAI API Key not found!**
-        
-        Please set up your API key:
-        1. Create a folder `.streamlit` in your project root
-        2. Create a file `secrets.toml` inside it
-        3. Add: `OPENAI_API_KEY = "your-api-key-here"`
-        """)
-        st.stop()
+def get_api_key() -> str:
+    """Retrieve the OpenAI API key without storing it in source code."""
+    api_key = os.getenv("OPENAI_API_KEY", "").strip()
+
+    if not api_key:
+        try:
+            secret_value = st.secrets.get("OPENAI_API_KEY", "")
+            api_key = secret_value.strip() if isinstance(secret_value, str) else ""
+        except (FileNotFoundError, StreamlitSecretNotFoundError):
+            api_key = ""
+
+    if api_key:
+        return api_key
+
+    st.error("""
+    ⚠️ **OpenAI API key not found**
+
+    Paid mode needs a key supplied through the `OPENAI_API_KEY`
+    environment variable or `.streamlit/secrets.toml`.
+
+    Never put the key directly in this Python file.
+    """)
+    st.stop()
+
 
 # --- FREE LLM: FLAN-T5 (runs locally, no API costs) ---
 class FlanT5LLM(LLM):
     """Free local LLM using FLAN-T5"""
-    model_name: str = "google/flan-t5-small"
+    model_name: str = FREE_CHAT_MODEL
     tokenizer: Any = None
     model: Any = None
-    
+
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
         device = "cuda" if torch.cuda.is_available() else "cpu"
         self.model = AutoModelForSeq2SeqLM.from_pretrained(self.model_name).to(device)
-    
+
     @property
     def _llm_type(self) -> str:
         return "flan-t5"
-    
+
     def _call(self, prompt: str, stop: Optional[List[str]] = None, **kwargs) -> str:
         device = self.model.device
         inputs = self.tokenizer(prompt, return_tensors="pt", truncation=True, max_length=512).to(device)
         outputs = self.model.generate(**inputs, max_new_tokens=256, do_sample=False)
         return self.tokenizer.decode(outputs[0], skip_special_tokens=True)
 
+
+@st.cache_resource
+def get_free_embeddings():
+    """Load and cache the local embedding model."""
+    return HuggingFaceEmbeddings(model_name=FREE_EMBEDDING_MODEL)
+
+
 @st.cache_resource
 def get_free_llm():
-    """Cached FLAN-T5 model to avoid reloading"""
+    """Load and cache the local FLAN-T5 model."""
     return FlanT5LLM()
 
 # --- PROCESS PDF ---
 if file is not None:
+    file_id = f"{selected_mode}:{hashlib.sha256(file.getvalue()).hexdigest()}"
+
     # Check if this is a new file
-    if st.session_state.current_file != file.name:
+    if st.session_state.current_file_id != file_id:
         with st.status("🔄 Processing your document...", expanded=True) as status:
             try:
                 # Step 1: Extract text
@@ -308,16 +377,20 @@ if file is not None:
                 # Step 3: Create embeddings
                 st.write("🧠 Creating embeddings...")
                 if FREE_MODE:
-                    embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+                    embeddings = get_free_embeddings()
                 else:
                     from langchain_openai import OpenAIEmbeddings
                     api_key = get_api_key()
-                    embeddings = OpenAIEmbeddings(api_key=api_key)
+                    embeddings = OpenAIEmbeddings(
+                        api_key=api_key,
+                        model=PAID_EMBEDDING_MODEL,
+                    )
                 
                 # Step 4: Build vector store
                 st.write("📊 Building vector database...")
                 st.session_state.vector_store = FAISS.from_texts(chunks, embeddings)
                 st.session_state.current_file = file.name
+                st.session_state.current_file_id = file_id
                 
                 status.update(label="✅ Document ready!", state="complete", expanded=False)
                 st.toast("Document indexed successfully!", icon="🎉")
@@ -366,7 +439,7 @@ Answer:""")
                         api_key = get_api_key()
                         llm = ChatOpenAI(
                             api_key=api_key,
-                            model="gpt-3.5-turbo",
+                            model=PAID_CHAT_MODEL,
                             temperature=0.2,
                             max_tokens=500
                         )
