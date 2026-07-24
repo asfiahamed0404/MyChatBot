@@ -1,179 +1,175 @@
-# 📚 Asfi's NoteBot
+# Asfi's NoteBot
 
-Chat with PDF notes using retrieval-augmented generation (RAG). The Streamlit
-app supports a free local mode and an optional paid OpenAI mode.
+A page-aware PDF study assistant built with Streamlit. It supports:
 
-## Features
+- A free local mode using Qwen and FastEmbed, with no OpenAI calls.
+- An optional paid local mode using OpenAI for stronger answers.
+- A resource-bounded free profile prepared for Streamlit Community Cloud.
 
-- Upload a text-based PDF and ask questions about its contents.
-- Switch between free and paid modes from the sidebar.
-- Review document page and chunk counts before starting a conversation.
-- See the PDF pages retrieved for each answer.
-- Start quickly with built-in topic, terminology, and quiz prompts.
-- Keep chat history for the current Streamlit session.
-- Build an in-memory FAISS index for document retrieval.
-- Load API credentials from local Streamlit secrets or an environment variable.
-- Keep local models cached between Streamlit reruns.
-- Use a responsive dark interface with explicit document-processing controls.
+## What it does
+
+- Reads text-based PDFs and keeps page metadata with every passage.
+- Retrieves the strongest passage plus nearby context from the same PDF page.
+- Shows which PDF pages were used.
+- Removes unsupported page citations and blocks remote images in model output.
+- Keeps the document index and conversation in the current Streamlit session.
+- Downloads pinned local models into the normal user cache, outside this repository.
+
+Scanned, image-only PDFs need OCR before NoteBot can read them.
 
 ## Modes
 
-| Mode | Embeddings | Answer model | Data handling |
+| Profile | Search model | Answer model | PDF handling |
 | --- | --- | --- | --- |
-| Free | `sentence-transformers/all-MiniLM-L6-v2` | `Qwen2.5-1.5B-Instruct` (`Q4_K_M`) | Runs on the machine hosting the app after model download |
-| Paid | `text-embedding-3-small` | `gpt-4o-mini` | Sends extracted PDF text for embedding and retrieved passages for answers |
+| Local free | `BAAI/bge-small-en-v1.5` | `Qwen2.5-1.5B-Instruct` Q4 | Processed on your computer; not sent to OpenAI |
+| Local paid | `text-embedding-3-small` | `gpt-4o-mini` | Extracted text and questions are sent to OpenAI |
+| Free cloud | `BAAI/bge-small-en-v1.5` | `Qwen2.5-1.5B-Instruct` Q4 | Processed in Streamlit's hosted memory; not sent to OpenAI |
 
-Changing modes clears the current document index and indexes the uploaded PDF
-again using the selected provider.
+The public cloud entrypoint intentionally disables paid mode. This prevents
+visitors from spending money through a shared OpenAI key.
 
-## Requirements
+## Run locally
 
-- Python 3.10 or newer; Python 3.11 is recommended and tested.
-- `pip`
-- Internet access during installation and the first free-model download.
-- At least 2.5 GB of free disk space during the first download; about 1.2 GB
-  remains cached afterward.
-- 16 GB of system RAM is recommended for comfortable CPU free-mode use.
-- An OpenAI API key only when using paid mode.
+Requirements:
 
-## Installation
+- Python 3.11 recommended
+- Internet access during installation and the first model download
+- About 2.5 GB free disk space
+- 16 GB RAM recommended for comfortable local free-mode use
+- An OpenAI API key only for paid mode
 
-Clone the repository:
+Clone and enter the project:
 
 ```powershell
-git clone https://github.com/asfiahamed0404/MyChatBot-OpenAIKEY-.git MyOwnChatBotProject
+git clone https://github.com/asfiahamed0404/MyChatBot.git MyOwnChatBotProject
 cd MyOwnChatBotProject
 ```
 
-Create a virtual environment. On Windows, install the official prebuilt
-`llama-cpp-python` CPU wheel first; this avoids needing a local C++ compiler:
+On Windows, create an environment and install the prebuilt CPU wheel first:
 
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install --upgrade pip
 .\.venv\Scripts\python.exe -m pip install --only-binary=:all: --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu "llama-cpp-python==0.3.34"
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe -m streamlit run .\asfi_notebot.py
 ```
 
-For macOS or Linux:
+On macOS or Linux:
 
 ```bash
 python3 -m venv .venv
 ./.venv/bin/python -m pip install --upgrade pip
 ./.venv/bin/python -m pip install -r requirements.txt
+./.venv/bin/python -m streamlit run ./asfi_notebot.py
 ```
 
-On macOS or Linux, `llama-cpp-python` may compile locally and therefore needs a
-C/C++ compiler and CMake. See the
-[official installation options](https://github.com/abetlen/llama-cpp-python#installation)
-for platform-specific CPU or Metal wheels.
+`llama-cpp-python` may compile on macOS or Linux if a compatible wheel is not
+available, which requires a C/C++ compiler and CMake.
 
-## Configure paid mode
+Open `http://localhost:8501` if Streamlit does not open automatically.
 
-The free mode does not require an API key.
+### Configure local paid mode
 
-For paid mode, copy the provided example:
+Free mode does not need an API key. For paid mode:
 
 ```powershell
 Copy-Item .streamlit\secrets.toml.example .streamlit\secrets.toml
 ```
 
-Then edit `.streamlit/secrets.toml` locally:
+Then edit the ignored `.streamlit/secrets.toml` file:
 
 ```toml
-OPENAI_API_KEY = "replace-with-your-openai-api-key"
+OPENAI_API_KEY = "replace-with-your-new-openai-api-key"
 ```
 
-The real `.streamlit/secrets.toml` is ignored by Git. Never put a key directly
-in Python code, commit it, or share it in screenshots or chat messages.
+You can instead set the `OPENAI_API_KEY` environment variable before starting
+Streamlit. Never put the key in Python, commit it, or paste it into a public
+deployment file.
 
-Alternatively, set an `OPENAI_API_KEY` environment variable before starting
-the application.
+## Deploy free on Streamlit Community Cloud
 
-## Run
+The repository contains a separate cloud entrypoint and a small dependency set.
+The only remaining deployment action needs your GitHub/Streamlit login:
 
-Windows:
+1. Open [share.streamlit.io](https://share.streamlit.io) and sign in with GitHub.
+2. Select **Create app**, then **Yup, I have an app**.
+3. Use repository `asfiahamed0404/MyChatBot`.
+4. Use branch `main`.
+5. Use entrypoint `cloud/streamlit_app.py`.
+6. Open **Advanced settings** and choose Python `3.11`.
+7. Leave **Secrets** empty; the free cloud profile does not use an API key.
+8. Select **Deploy**.
 
-```powershell
-.\.venv\Scripts\python.exe -m streamlit run .\asfi_notebot.py
-```
+The first preparation downloads about 1.2 GB of models and can take several
+minutes. Community Cloud may hibernate inactive apps, so a cold start can also
+take time.
 
-macOS or Linux:
+Free-cloud safeguards:
 
-```bash
-./.venv/bin/python -m streamlit run ./asfi_notebot.py
-```
+- Free mode only; no shared paid API key
+- 10 MB, 100-page, 500,000-character, and 500-passage PDF limits
+- 12 successful answers per browser session as a soft usage cap
+- Two CPU inference threads and serialized model use
+- Session-memory document index
 
-Open `http://localhost:8501` if Streamlit does not open it automatically.
+Community Cloud resource limits and availability can change. If the app reaches
+a hosting limit, check its cloud logs and reboot it from **Manage app**.
+The session cap prevents accidental overuse, but it is not authentication or
+strong denial-of-service protection. Use a private deployment or add real
+authentication before relying on the app for controlled access.
 
-This existing checkout also has a verified environment named `.venv_new`, so
-it can be started with:
+## Use the app
 
-```powershell
-.\.venv_new\Scripts\python.exe -m streamlit run .\asfi_notebot.py
-```
+1. Choose **Free** or **Paid** when running locally.
+2. Upload a text-based PDF.
+3. Select **Prepare with local AI** or **Prepare with OpenAI**.
+4. Wait for extraction, embedding, and indexing.
+5. Ask a specific question, such as `What is a parametric curve?`
+6. Check the retrieved page number shown under the answer.
 
-## Usage
-
-1. Select **Free** or **Paid** in the sidebar.
-2. Upload a text-based PDF up to 25 MB and 300 pages.
-3. Select **Prepare with local AI** or **Prepare with OpenAI**. Paid processing
-   begins only after you press the button.
-4. Wait for extraction, chunking, embedding, and indexing to finish.
-5. Ask a question, or start with one of the suggested prompts.
-6. Use **Clear chat** to reset messages or **Remove document** to remove the
-   current in-memory index.
-
-Scanned image-only PDFs require OCR before this application can extract their
-text.
+Local limits are 25 MB and 300 pages.
 
 ## Project structure
 
 ```text
 MyOwnChatBotProject/
-├── asfi_notebot.py
-├── requirements.txt
-├── README.md
-├── LICENSE
-├── .gitignore
-└── .streamlit/
-    ├── config.toml
-    └── secrets.toml.example
+|-- asfi_notebot.py
+|-- requirements.txt
+|-- README.md
+|-- LICENSE
+|-- .gitignore
+|-- .streamlit/
+|   |-- config.toml
+|   `-- secrets.toml.example
+`-- cloud/
+    |-- streamlit_app.py
+    `-- requirements.txt
 ```
 
-Local virtual environments, IDE settings, caches, and the real secrets file
-are intentionally excluded from Git.
+Virtual environments, IDE settings, logs, model weights, and the real secrets
+file are excluded from Git.
 
 ## Troubleshooting
 
-Check the environment:
+Check the local environment:
 
 ```powershell
 .\.venv\Scripts\python.exe -m pip check
 ```
 
-Reinstall declared dependencies:
-
-```powershell
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
-```
-
-If PowerShell blocks virtual-environment activation, use the full Python path
-shown above; activation is optional.
-
-The first free preparation downloads a pinned 4-bit Qwen model (about 1.1 GB)
-plus the embedding model. The files stay in the normal Hugging Face cache
-outside this repository and are reused later. CPU answers take longer than paid
-API answers, but no PDF text or question is sent to OpenAI in free mode.
+If free preparation fails on first use, verify internet access and free disk
+space, then restart Streamlit. If an answer is weak, ask a more specific
+question and confirm that the displayed retrieved pages contain the topic.
 
 ## Security
 
-- Rotate a credential immediately if it is ever committed or shared.
+- Rotate a credential immediately if it is committed or shared.
 - Removing a key from the latest file does not remove it from older Git commits.
 - Review staged changes with `git diff --cached` before every push.
-- Avoid `git add .` when unexpected untracked files are present.
-- Before deploying paid mode publicly, add authentication, request limits, and
-  a spending cap so visitors cannot consume a shared server API key.
+- Keep `.streamlit/secrets.toml` local and ignored.
+- Do not enable paid mode in a public app without authentication, rate limits,
+  and an OpenAI spending cap.
 
 ## License
 
