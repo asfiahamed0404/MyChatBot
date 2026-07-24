@@ -1673,7 +1673,7 @@ else:
             else ":material/auto_awesome:"
         )
         with st.chat_message(message["role"], avatar=avatar):
-            st.markdown(message["content"])
+            st.markdown(message["content"], unsafe_allow_html=False)
             source_pages = message.get("source_pages", [])
             if source_pages:
                 pages = ", ".join(str(page) for page in source_pages)
@@ -1703,7 +1703,7 @@ else:
                         # Count user attempts before any provider call, including failures.
                         st.session_state.cloud_questions_answered += 1
                     response, source_pages = generate_answer(prompt, selected_mode)
-                    st.markdown(response)
+                    st.markdown(response, unsafe_allow_html=False)
                     if source_pages:
                         pages = ", ".join(str(page) for page in source_pages)
                         st.caption(

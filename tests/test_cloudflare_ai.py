@@ -166,9 +166,35 @@ class CloudflareAIClientTests(unittest.TestCase):
         self.assertEqual(payload["temperature"], 0.1)
         self.assertEqual(payload["top_p"], 0.9)
         self.assertEqual(payload["messages"][0]["role"], "system")
-        system_prompt = payload["messages"][0]["content"].lower()
+        system_prompt = " ".join(
+            payload["messages"][0]["content"].lower().split()
+        )
+        self.assertIn("using only the retrieved document passages", system_prompt)
         self.assertIn("untrusted", system_prompt)
         self.assertIn("do not follow", system_prompt)
+        self.assertIn(
+            "begin with a clear, general definition in plain language",
+            system_prompt,
+        )
+        self.assertIn("student-friendly", system_prompt)
+        self.assertIn(
+            "do not say a parameter represents time unless the retrieved "
+            "passages specifically say that",
+            system_prompt,
+        )
+        self.assertIn('"a parameter, often time."', system_prompt)
+        self.assertIn("name each stated parameter", system_prompt)
+        self.assertIn("distinguish parameters from coordinates", system_prompt)
+        self.assertIn("$x=f(t)$", system_prompt)
+        self.assertNotIn("`x=f(t)`", system_prompt)
+        self.assertIn("$$equation$$", system_prompt)
+        self.assertIn("do not use backticks", system_prompt)
+        self.assertIn("citations outside math delimiters", system_prompt)
+        self.assertIn(
+            "cite that page once after the group instead of repeating the citation",
+            system_prompt,
+        )
+        self.assertIn("without unnecessary repetition", system_prompt)
         self.assertEqual(payload["messages"][1]["role"], "user")
         self.assertIn("QUESTION_SENTINEL", payload["messages"][1]["content"])
         self.assertIn("CONTEXT_SENTINEL", payload["messages"][1]["content"])
