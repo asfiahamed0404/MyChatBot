@@ -1,7 +1,6 @@
 import hashlib
 import logging
 import os
-import re
 import threading
 from dataclasses import dataclass
 from pathlib import Path
@@ -9,6 +8,18 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import streamlit as st
+from answer_safety import sanitize_answer_markdown
+from cloudflare_ai import (
+    CLOUDFLARE_MODEL,
+    MAX_QUESTION_CHARS as MAX_CLOUD_QUESTION_CHARS,
+    CloudflareAIClient,
+    CloudflareAIError,
+    CloudflareConfigurationError,
+    CloudflareLocalBusyError,
+    CloudflareLocalUsageLimitError,
+    CloudflareUsageGuard,
+    generate_cloudflare_answer,
+)
 from pypdf import PdfReader
 from streamlit.errors import StreamlitSecretNotFoundError
 
@@ -20,22 +31,17 @@ if DEPLOYMENT_PROFILE not in {"local", "cloud"}:
 CLOUD_PROFILE = DEPLOYMENT_PROFILE == "cloud"
 
 FREE_EMBEDDING_MODEL = "BAAI/bge-small-en-v1.5"
+FREE_CHAT_MODEL = "Qwen/Qwen2.5-1.5B-Instruct-GGUF"
+FREE_CHAT_MODEL_FILE = "qwen2.5-1.5b-instruct-q4_k_m.gguf"
+FREE_CHAT_MODEL_REVISION = "91cad51170dc346986eccefdc2dd33a9da36ead9"
+FREE_CHAT_DOWNLOAD_LABEL = "about 1.1 GB"
+FREE_DISK_REQUIREMENT = "2.5 GB"
 if CLOUD_PROFILE:
-    FREE_CHAT_MODEL = "Qwen/Qwen2.5-1.5B-Instruct-GGUF"
-    FREE_CHAT_MODEL_FILE = "qwen2.5-1.5b-instruct-q4_k_m.gguf"
-    FREE_CHAT_MODEL_REVISION = "91cad51170dc346986eccefdc2dd33a9da36ead9"
-    FREE_MODEL_LABEL = "Qwen 2.5 · 1.5B cloud"
-    FREE_MODEL_DOWNLOAD_LABEL = "about 1.2 GB total"
-    FREE_CHAT_DOWNLOAD_LABEL = "about 1.1 GB"
-    FREE_DISK_REQUIREMENT = "2.5 GB"
+    FREE_MODEL_LABEL = "Cloudflare · Qwen3 30B"
+    FREE_MODEL_DOWNLOAD_LABEL = "about 70 MB"
 else:
-    FREE_CHAT_MODEL = "Qwen/Qwen2.5-1.5B-Instruct-GGUF"
-    FREE_CHAT_MODEL_FILE = "qwen2.5-1.5b-instruct-q4_k_m.gguf"
-    FREE_CHAT_MODEL_REVISION = "91cad51170dc346986eccefdc2dd33a9da36ead9"
     FREE_MODEL_LABEL = "Qwen 2.5 · 1.5B"
     FREE_MODEL_DOWNLOAD_LABEL = "about 1.2 GB total"
-    FREE_CHAT_DOWNLOAD_LABEL = "about 1.1 GB"
-    FREE_DISK_REQUIREMENT = "2.5 GB"
 
 PAID_EMBEDDING_MODEL = "text-embedding-3-small"
 PAID_CHAT_MODEL = "gpt-4o-mini"
@@ -44,26 +50,17 @@ MAX_PDF_SIZE_MB = 10 if CLOUD_PROFILE else 25
 MAX_PDF_PAGES = 100 if CLOUD_PROFILE else 300
 MAX_EXTRACTED_CHARACTERS = 500_000 if CLOUD_PROFILE else 2_000_000
 MAX_PDF_CHUNKS = 500 if CLOUD_PROFILE else 4_000
-FREE_MODEL_CONTEXT_TOKENS = 1536 if CLOUD_PROFILE else 2048
-MAX_FREE_CONTEXT_TOKENS = 950 if CLOUD_PROFILE else 1200
-MAX_FREE_QUESTION_TOKENS = 160 if CLOUD_PROFILE else 192
-MAX_FREE_OUTPUT_TOKENS = 192 if CLOUD_PROFILE else 256
+FREE_MODEL_CONTEXT_TOKENS = 2048
+MAX_FREE_CONTEXT_TOKENS = 1200
+MAX_FREE_QUESTION_TOKENS = 192
+MAX_FREE_OUTPUT_TOKENS = 256
 FREE_RETRIEVED_PASSAGES = 2
 PAID_RETRIEVED_PASSAGES = 4
 MAX_FREE_RETRIEVAL_CANDIDATES = 6
-MODEL_WAIT_SECONDS = 8 if CLOUD_PROFILE else 60
+MODEL_WAIT_SECONDS = 60
 MAX_CHAT_MESSAGES = 50
 MAX_CLOUD_QUESTIONS_PER_SESSION = 12
 VALID_MODES = {"free"} if CLOUD_PROFILE else {"free", "paid"}
-
-REMOTE_MARKDOWN_IMAGE_PATTERN = re.compile(
-    r"!\[([^\]]*)\]\(\s*(?:https?://|data:)[^)]+\)",
-    flags=re.IGNORECASE,
-)
-INLINE_PAGE_CITATION_PATTERN = re.compile(
-    r"\[Page\s+(\d+)\]",
-    flags=re.IGNORECASE,
-)
 
 
 @dataclass
@@ -451,18 +448,23 @@ class LocalModelBusyError(Exception):
     """Raised when another public request is already using the local model."""
 
 
-def load_api_key() -> str:
-    """Read the OpenAI key from the environment or ignored Streamlit secrets."""
-    api_key = os.getenv("OPENAI_API_KEY", "").strip()
-    if api_key:
-        return api_key
+def load_secret(secret_name: str) -> str:
+    """Read one secret from the server environment or Streamlit secrets."""
+    environment_value = os.getenv(secret_name, "").strip()
+    if environment_value:
+        return environment_value
 
     try:
-        secret_value = st.secrets.get("OPENAI_API_KEY", "")
+        secret_value = st.secrets.get(secret_name, "")
     except (FileNotFoundError, StreamlitSecretNotFoundError):
         return ""
 
     return secret_value.strip() if isinstance(secret_value, str) else ""
+
+
+def load_api_key() -> str:
+    """Read the OpenAI key from the environment or ignored Streamlit secrets."""
+    return load_secret("OPENAI_API_KEY")
 
 
 def require_api_key() -> str:
@@ -472,6 +474,37 @@ def require_api_key() -> str:
             "Add OPENAI_API_KEY to .streamlit/secrets.toml, then restart the app."
         )
     return api_key
+
+
+def load_cloudflare_credentials() -> Tuple[str, str]:
+    """Read server-side Cloudflare credentials without exposing them to the browser."""
+    return (
+        load_secret("CLOUDFLARE_ACCOUNT_ID"),
+        load_secret("CLOUDFLARE_API_TOKEN"),
+    )
+
+
+def require_cloudflare_credentials() -> Tuple[str, str]:
+    account_id, api_token = load_cloudflare_credentials()
+    if not account_id or not api_token:
+        raise CloudflareConfigurationError(
+            "The hosted answer service is not configured. The app owner must add "
+            "CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN to Streamlit Secrets."
+        )
+
+    # Construction validates the account ID and token without making a network call.
+    CloudflareAIClient(account_id, api_token)
+    return account_id, api_token
+
+
+def cloudflare_credentials_are_ready() -> bool:
+    if not CLOUD_PROFILE:
+        return False
+    try:
+        require_cloudflare_credentials()
+    except CloudflareConfigurationError:
+        return False
+    return True
 
 
 def clear_document_state(clear_messages: bool = True) -> None:
@@ -524,29 +557,6 @@ def format_file_size(size_bytes: int) -> str:
 def validate_mode(mode: str) -> None:
     if mode not in VALID_MODES:
         raise ValueError("Invalid answer mode.")
-
-
-def sanitize_answer_markdown(
-    answer: str,
-    valid_source_pages: Optional[List[int]] = None,
-) -> str:
-    """Block remote images and discard page citations outside retrieved evidence."""
-    sanitized_answer = REMOTE_MARKDOWN_IMAGE_PATTERN.sub(
-        lambda match: f"[External image omitted: {match.group(1) or 'image'}]",
-        answer,
-    )
-    if valid_source_pages is None:
-        return sanitized_answer
-
-    valid_pages = set(valid_source_pages)
-    return INLINE_PAGE_CITATION_PATTERN.sub(
-        lambda match: (
-            match.group(0)
-            if int(match.group(1)) in valid_pages
-            else ""
-        ),
-        sanitized_answer,
-    )
 
 
 def build_passage_context(
@@ -786,6 +796,12 @@ def get_preparation_lock() -> threading.Lock:
 
 
 @st.cache_resource(show_spinner=False)
+def get_cloudflare_usage_guard() -> CloudflareUsageGuard:
+    """Share best-effort Cloudflare request limits across sessions in this process."""
+    return CloudflareUsageGuard()
+
+
+@st.cache_resource(show_spinner=False)
 def get_free_llm() -> LocalQwenRuntime:
     """Download the pinned GGUF once, then cache one local model runtime."""
     from huggingface_hub import hf_hub_download
@@ -999,19 +1015,34 @@ def generate_answer(prompt: str, mode: str) -> Tuple[str, List[int]]:
         raise RuntimeError("No relevant document passages were found.")
 
     if mode == "free":
-        llm = get_free_llm()
-        safe_question = llm.truncate(
-            prompt,
-            MAX_FREE_QUESTION_TOKENS,
-        )
-        context, source_pages = build_passage_context(
-            documents,
-            token_counter=llm.count_tokens,
-            token_budget=MAX_FREE_CONTEXT_TOKENS,
-        )
-        if not context:
-            raise RuntimeError("Relevant passages did not fit the local model context.")
-        response = llm.answer(safe_question, context)
+        if CLOUD_PROFILE:
+            context, source_pages = build_passage_context(documents)
+            if not context:
+                raise RuntimeError("No usable document context was retrieved.")
+            account_id, api_token = require_cloudflare_credentials()
+            with get_cloudflare_usage_guard().request_slot():
+                response = generate_cloudflare_answer(
+                    account_id,
+                    api_token,
+                    prompt,
+                    context,
+                )
+        else:
+            llm = get_free_llm()
+            safe_question = llm.truncate(
+                prompt,
+                MAX_FREE_QUESTION_TOKENS,
+            )
+            context, source_pages = build_passage_context(
+                documents,
+                token_counter=llm.count_tokens,
+                token_budget=MAX_FREE_CONTEXT_TOKENS,
+            )
+            if not context:
+                raise RuntimeError(
+                    "Relevant passages did not fit the local model context."
+                )
+            response = llm.answer(safe_question, context)
     else:
         from openai import OpenAI
 
@@ -1048,11 +1079,17 @@ when that exact page label appears in the supplied passages.""",
     if not response:
         raise RuntimeError("The model returned an empty answer.")
 
-    return sanitize_answer_markdown(response, source_pages), source_pages
+    sanitized_response = sanitize_answer_markdown(response, source_pages).strip()
+    if not sanitized_response:
+        raise RuntimeError("The model returned no displayable answer.")
+    return sanitized_response, source_pages
 
 
 if st.session_state.pop("show_ready_toast", False):
     st.toast("Your PDF is ready to chat with.")
+
+
+cloudflare_ready = cloudflare_credentials_are_ready()
 
 
 with st.sidebar:
@@ -1097,18 +1134,32 @@ with st.sidebar:
 
     with st.container(border=True, key="mode_summary"):
         if free_mode:
-            st.badge(
-                "No-API mode",
-                icon=":material/lock:",
-                color="green",
-            )
             if CLOUD_PROFILE:
+                st.badge(
+                    (
+                        "Cloudflare AI configured"
+                        if cloudflare_ready
+                        else "Cloudflare AI not configured"
+                    ),
+                    icon=(
+                        ":material/cloud_done:"
+                        if cloudflare_ready
+                        else ":material/cloud_off:"
+                    ),
+                    color="green" if cloudflare_ready else "orange",
+                )
                 st.caption(
-                    "No OpenAI charges or shared API key. The quantized Qwen "
-                    "runtime is bounded for free hosting limits. "
-                    "PDF text is processed in the Streamlit-hosted server memory."
+                    "Search and indexing stay in this Streamlit server. For each "
+                    "answer, your question and up to two retrieved PDF passages "
+                    "are sent to Cloudflare Workers AI. For a very short PDF, "
+                    "those passages may contain most or all of its extracted text."
                 )
             else:
+                st.badge(
+                    "No-API mode",
+                    icon=":material/lock:",
+                    color="green",
+                )
                 st.caption(
                     "No OpenAI charges. A quantized Qwen model runs privately on "
                     "the machine hosting this app after its first download."
@@ -1176,7 +1227,7 @@ with st.sidebar:
 
 
 if CLOUD_PROFILE:
-    mode_hero_label = "Free cloud demo"
+    mode_hero_label = "Cloudflare Qwen3 answers"
 else:
     mode_hero_label = "No OpenAI calls" if free_mode else "OpenAI-powered answers"
 st.markdown(
@@ -1285,19 +1336,31 @@ with st.container(border=True, key="document_workspace"):
             st.success("Ready. Ask a question below or choose another PDF to replace it.")
         else:
             if free_mode:
-                st.info(
-                    f"First use downloads the local models ({FREE_MODEL_DOWNLOAD_LABEL}). "
-                    "Later sessions reuse the cache while the app instance is running."
-                )
                 if CLOUD_PROFILE:
-                    st.caption(
-                        "Your PDF is processed in this app's hosted session memory "
-                        "and is not sent to OpenAI."
+                    st.info(
+                        "First use downloads only the local PDF search model "
+                        f"({FREE_MODEL_DOWNLOAD_LABEL}). Answers use "
+                        f"{CLOUDFLARE_MODEL} through Cloudflare Workers AI."
                     )
-                st.caption(
-                    "The first download can take several minutes and may not show "
-                    "byte-by-byte progress. Keep this tab open until preparation finishes."
-                )
+                    st.caption(
+                        "The PDF is extracted and indexed in this Streamlit server's "
+                        "session memory. Each question and up to two retrieved passages "
+                        "are sent to Cloudflare. The file, filename, vector index, and "
+                        "chat history are not sent; for a very short PDF, the passages "
+                        "may contain most or all of its extracted text."
+                    )
+                    st.warning(
+                        "This is a public demo. Do not upload confidential or sensitive PDFs."
+                    )
+                else:
+                    st.info(
+                        f"First use downloads the local models ({FREE_MODEL_DOWNLOAD_LABEL}). "
+                        "Later sessions reuse the cache while the app instance is running."
+                    )
+                    st.caption(
+                        "The first download can take several minutes and may not show "
+                        "byte-by-byte progress. Keep this tab open until preparation finishes."
+                    )
             else:
                 st.warning(
                     "Preparing with OpenAI sends the extracted text from this PDF for embedding. "
@@ -1305,21 +1368,33 @@ with st.container(border=True, key="document_workspace"):
                 )
 
             api_key_missing = not free_mode and not load_api_key()
+            cloudflare_config_missing = (
+                CLOUD_PROFILE and free_mode and not cloudflare_ready
+            )
             if api_key_missing:
                 st.error(
                     "Paid mode needs OPENAI_API_KEY in .streamlit/secrets.toml. "
                     "Restart Streamlit after adding it."
                 )
+            if cloudflare_config_missing:
+                st.error(
+                    "Hosted answers are not configured. The app owner must add "
+                    "CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN in Streamlit Secrets, "
+                    "then reboot the app."
+                )
 
-            prepare_label = (
-                "Prepare with local AI" if free_mode else "Prepare with OpenAI"
-            )
+            if CLOUD_PROFILE:
+                prepare_label = "Prepare for hosted AI"
+            else:
+                prepare_label = (
+                    "Prepare with local AI" if free_mode else "Prepare with OpenAI"
+                )
             prepare_clicked = st.button(
                 prepare_label,
                 key="prepare_document_button",
                 type="primary",
                 icon=":material/auto_awesome:",
-                disabled=api_key_missing,
+                disabled=api_key_missing or cloudflare_config_missing,
                 width="stretch",
             )
 
@@ -1333,6 +1408,7 @@ with st.container(border=True, key="document_workspace"):
                 ) as preparation_status:
                     try:
                         if CLOUD_PROFILE:
+                            require_cloudflare_credentials()
                             preparation_lock = get_preparation_lock()
                             preparation_lock_acquired = preparation_lock.acquire(
                                 blocking=False
@@ -1349,23 +1425,29 @@ with st.container(border=True, key="document_workspace"):
                         )
 
                         if free_mode:
-                            st.write(
-                                "Loading the private Qwen answer model "
-                                f"(first use downloads {FREE_CHAT_DOWNLOAD_LABEL} "
-                                "and can take several minutes)"
-                            )
-                            try:
-                                get_free_llm()
-                            except Exception as error:
-                                raise LocalAISetupError(
-                                    "The local Qwen model could not be downloaded or loaded. "
-                                    f"Check your connection, allow at least "
-                                    f"{FREE_DISK_REQUIREMENT} of free "
-                                    "disk space, and close memory-heavy apps before retrying."
-                                ) from error
-                            st.write(
-                                "Loading the local search model and building a private index"
-                            )
+                            if CLOUD_PROFILE:
+                                st.write(
+                                    "Loading the local PDF search model and building "
+                                    "the session index"
+                                )
+                            else:
+                                st.write(
+                                    "Loading the private Qwen answer model "
+                                    f"(first use downloads {FREE_CHAT_DOWNLOAD_LABEL} "
+                                    "and can take several minutes)"
+                                )
+                                try:
+                                    get_free_llm()
+                                except Exception as error:
+                                    raise LocalAISetupError(
+                                        "The local Qwen model could not be downloaded or loaded. "
+                                        f"Check your connection, allow at least "
+                                        f"{FREE_DISK_REQUIREMENT} of free "
+                                        "disk space, and close memory-heavy apps before retrying."
+                                    ) from error
+                                st.write(
+                                    "Loading the local search model and building a private index"
+                                )
                         else:
                             st.write("Creating the OpenAI search index")
 
@@ -1399,6 +1481,13 @@ with st.container(border=True, key="document_workspace"):
                             expanded=True,
                         )
                         st.error(str(error))
+                    except CloudflareConfigurationError as error:
+                        preparation_status.update(
+                            label="Hosted AI setup required",
+                            state="error",
+                            expanded=True,
+                        )
+                        st.error(str(error))
                     except LocalModelBusyError as error:
                         preparation_status.update(
                             label="Free cloud model is busy",
@@ -1409,7 +1498,11 @@ with st.container(border=True, key="document_workspace"):
                     except LocalAISetupError as error:
                         LOGGER.exception("Local AI setup failed")
                         preparation_status.update(
-                            label="Local AI setup failed",
+                            label=(
+                                "PDF search setup failed"
+                                if CLOUD_PROFILE
+                                else "Local AI setup failed"
+                            ),
                             state="error",
                             expanded=True,
                         )
@@ -1422,11 +1515,17 @@ with st.container(border=True, key="document_workspace"):
                             expanded=True,
                         )
                         if free_mode:
-                            st.error(
-                                "Local AI could not finish preparing this document. "
-                                "Check the PDF, free disk space, and available memory, "
-                                "then restart and try again."
-                            )
+                            if CLOUD_PROFILE:
+                                st.error(
+                                    "NoteBot could not build the PDF search index. "
+                                    "Check the PDF and available cloud memory, then try again."
+                                )
+                            else:
+                                st.error(
+                                    "Local AI could not finish preparing this document. "
+                                    "Check the PDF, free disk space, and available memory, "
+                                    "then restart and try again."
+                                )
                         else:
                             st.error(
                                 "NoteBot could not prepare this document with OpenAI. "
@@ -1445,10 +1544,10 @@ with st.container(border=True, key="document_workspace"):
 
 if st.session_state.vector_store is None:
     if CLOUD_PROFILE:
-        capability_heading = "Optimized for free hosting"
+        capability_heading = "Stronger hosted answers"
         capability_copy = (
-            "Compact local models keep this public demo inside the free "
-            "hosting budget without using a shared paid API key."
+            "Local passage search keeps requests small, while Cloudflare Qwen3 "
+            "turns the best two passages into a clearer answer."
         )
     else:
         capability_heading = "Free or higher quality"
@@ -1491,7 +1590,11 @@ else:
     with chat_status:
         st.badge(
             FREE_MODEL_LABEL if free_mode else PAID_CHAT_MODEL,
-            icon=":material/memory:" if free_mode else ":material/cloud:",
+            icon=(
+                ":material/cloud:"
+                if CLOUD_PROFILE or not free_mode
+                else ":material/memory:"
+            ),
             color="green" if free_mode else "violet",
             width="stretch",
         )
@@ -1502,17 +1605,24 @@ else:
         - st.session_state.cloud_questions_answered,
     )
     cloud_limit_reached = CLOUD_PROFILE and cloud_questions_remaining == 0
+    cloud_configuration_unavailable = CLOUD_PROFILE and not cloudflare_ready
+    cloud_chat_disabled = cloud_limit_reached or cloud_configuration_unavailable
     if CLOUD_PROFILE:
-        if cloud_limit_reached:
+        if cloud_configuration_unavailable:
+            st.error(
+                "Hosted answers are not configured. The app owner must add the "
+                "Cloudflare credentials and reboot the app."
+            )
+        elif cloud_limit_reached:
             st.warning(
-                "This free session has reached its 12-answer soft limit. "
+                "This free session has reached its 12-request soft limit. "
                 "Run NoteBot locally for unlimited private use."
             )
         else:
             st.caption(
-                f"{cloud_questions_remaining} free answer"
+                f"{cloud_questions_remaining} hosted request"
                 f"{'s' if cloud_questions_remaining != 1 else ''} "
-                "remaining in this session."
+                "remaining in this session. Failed attempts also count."
             )
 
     suggested_prompt: Optional[str] = None
@@ -1524,7 +1634,7 @@ else:
                 "Explain a key topic",
                 key="suggest_summary",
                 icon=":material/summarize:",
-                disabled=cloud_limit_reached,
+                disabled=cloud_chat_disabled,
                 width="stretch",
             ):
                 suggested_prompt = (
@@ -1536,7 +1646,7 @@ else:
                 "Define key terms",
                 key="suggest_key_ideas",
                 icon=":material/lightbulb:",
-                disabled=cloud_limit_reached,
+                disabled=cloud_chat_disabled,
                 width="stretch",
             ):
                 suggested_prompt = (
@@ -1548,7 +1658,7 @@ else:
                 "Quiz a key topic",
                 key="suggest_questions",
                 icon=":material/quiz:",
-                disabled=cloud_limit_reached,
+                disabled=cloud_chat_disabled,
                 width="stretch",
             ):
                 suggested_prompt = (
@@ -1571,13 +1681,17 @@ else:
 
     typed_prompt = st.chat_input(
         "Ask a question about your PDF...",
-        max_chars=2000,
+        max_chars=(
+            MAX_CLOUD_QUESTION_CHARS
+            if CLOUD_PROFILE
+            else 2000
+        ),
         key="document_chat_input",
-        disabled=cloud_limit_reached,
+        disabled=cloud_chat_disabled,
     )
     prompt = suggested_prompt or typed_prompt
 
-    if prompt and not cloud_limit_reached:
+    if prompt and not cloud_chat_disabled:
         st.session_state.messages.append({"role": "user", "content": prompt})
         with st.chat_message("user", avatar=":material/person:"):
             st.markdown(prompt)
@@ -1585,6 +1699,9 @@ else:
         with st.chat_message("assistant", avatar=":material/auto_awesome:"):
             with st.spinner("Searching your PDF and drafting an answer..."):
                 try:
+                    if CLOUD_PROFILE:
+                        # Count user attempts before any provider call, including failures.
+                        st.session_state.cloud_questions_answered += 1
                     response, source_pages = generate_answer(prompt, selected_mode)
                     st.markdown(response)
                     if source_pages:
@@ -1599,26 +1716,45 @@ else:
                             "source_pages": source_pages,
                         }
                     )
-                    if CLOUD_PROFILE:
-                        st.session_state.cloud_questions_answered += 1
                     if len(st.session_state.messages) > MAX_CHAT_MESSAGES:
                         st.session_state.messages = st.session_state.messages[
                             -MAX_CHAT_MESSAGES:
                         ]
+                    if (
+                        CLOUD_PROFILE
+                        and st.session_state.cloud_questions_answered
+                        >= MAX_CLOUD_QUESTIONS_PER_SESSION
+                    ):
+                        st.rerun()
                 except MissingAPIKeyError as error:
                     rollback_failed_prompt(prompt)
                     st.error(str(error))
                 except LocalModelBusyError as error:
                     rollback_failed_prompt(prompt)
                     st.warning(str(error))
+                except (
+                    CloudflareLocalBusyError,
+                    CloudflareLocalUsageLimitError,
+                ) as error:
+                    rollback_failed_prompt(prompt)
+                    st.warning(str(error))
+                except CloudflareAIError as error:
+                    rollback_failed_prompt(prompt)
+                    st.error(str(error))
                 except Exception:
                     LOGGER.exception("Answer generation failed")
                     rollback_failed_prompt(prompt)
                     if free_mode:
-                        st.error(
-                            "NoteBot could not generate an answer. Try a shorter question "
-                            "or restart the app."
-                        )
+                        if CLOUD_PROFILE:
+                            st.error(
+                                "The hosted AI could not generate an answer. "
+                                "Try again shortly."
+                            )
+                        else:
+                            st.error(
+                                "NoteBot could not generate an answer. Try a shorter question "
+                                "or restart the app."
+                            )
                     else:
                         st.error(
                             "OpenAI could not generate an answer. Check the key, account "
