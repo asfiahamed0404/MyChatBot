@@ -82,11 +82,11 @@ venv.bak/
 ehthumbs.db
 Thumbs.db
 
-# Model cache (optional - can be large)
-# Uncomment if you don't want to commit cached models
-# *.pt
-# *.bin
-# *.safetensors
+# Local model artifacts (keep large model weights out of Git)
+*.gguf
+*.pt
+*.bin
+*.safetensors
 
 # Logs
 *.log

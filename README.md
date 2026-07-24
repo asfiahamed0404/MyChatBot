@@ -7,17 +7,21 @@ app supports a free local mode and an optional paid OpenAI mode.
 
 - Upload a text-based PDF and ask questions about its contents.
 - Switch between free and paid modes from the sidebar.
+- Review document page and chunk counts before starting a conversation.
+- See the PDF pages retrieved for each answer.
+- Start quickly with built-in topic, terminology, and quiz prompts.
 - Keep chat history for the current Streamlit session.
 - Build an in-memory FAISS index for document retrieval.
 - Load API credentials from local Streamlit secrets or an environment variable.
 - Keep local models cached between Streamlit reruns.
+- Use a responsive dark interface with explicit document-processing controls.
 
 ## Modes
 
 | Mode | Embeddings | Answer model | Data handling |
 | --- | --- | --- | --- |
-| Free | `sentence-transformers/all-MiniLM-L6-v2` | `google/flan-t5-small` | Runs locally after model download |
-| Paid | `text-embedding-3-small` | `gpt-4o-mini` | Sends relevant document text to OpenAI |
+| Free | `sentence-transformers/all-MiniLM-L6-v2` | `Qwen2.5-1.5B-Instruct` (`Q4_K_M`) | Runs on the machine hosting the app after model download |
+| Paid | `text-embedding-3-small` | `gpt-4o-mini` | Sends extracted PDF text for embedding and retrieved passages for answers |
 
 Changing modes clears the current document index and indexes the uploaded PDF
 again using the selected provider.
@@ -27,6 +31,9 @@ again using the selected provider.
 - Python 3.10 or newer; Python 3.11 is recommended and tested.
 - `pip`
 - Internet access during installation and the first free-model download.
+- At least 2.5 GB of free disk space during the first download; about 1.2 GB
+  remains cached afterward.
+- 16 GB of system RAM is recommended for comfortable CPU free-mode use.
 - An OpenAI API key only when using paid mode.
 
 ## Installation
@@ -38,11 +45,13 @@ git clone https://github.com/asfiahamed0404/MyChatBot-OpenAIKEY-.git MyOwnChatBo
 cd MyOwnChatBotProject
 ```
 
-Create a virtual environment and install the dependencies:
+Create a virtual environment. On Windows, install the official prebuilt
+`llama-cpp-python` CPU wheel first; this avoids needing a local C++ compiler:
 
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install --upgrade pip
+.\.venv\Scripts\python.exe -m pip install --only-binary=:all: --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu "llama-cpp-python==0.3.34"
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
@@ -53,6 +62,11 @@ python3 -m venv .venv
 ./.venv/bin/python -m pip install --upgrade pip
 ./.venv/bin/python -m pip install -r requirements.txt
 ```
+
+On macOS or Linux, `llama-cpp-python` may compile locally and therefore needs a
+C/C++ compiler and CMake. See the
+[official installation options](https://github.com/abetlen/llama-cpp-python#installation)
+for platform-specific CPU or Metal wheels.
 
 ## Configure paid mode
 
@@ -102,11 +116,13 @@ it can be started with:
 ## Usage
 
 1. Select **Free** or **Paid** in the sidebar.
-2. Upload a text-based PDF.
-3. Wait for extraction, chunking, embedding, and indexing to finish.
-4. Ask questions in the chat box.
-5. Use **Reset Chat** to clear messages or **Clear Document** to remove the
-   current index.
+2. Upload a text-based PDF up to 25 MB and 300 pages.
+3. Select **Prepare with local AI** or **Prepare with OpenAI**. Paid processing
+   begins only after you press the button.
+4. Wait for extraction, chunking, embedding, and indexing to finish.
+5. Ask a question, or start with one of the suggested prompts.
+6. Use **Clear chat** to reset messages or **Remove document** to remove the
+   current in-memory index.
 
 Scanned image-only PDFs require OCR before this application can extract their
 text.
@@ -121,6 +137,7 @@ MyOwnChatBotProject/
 ├── LICENSE
 ├── .gitignore
 └── .streamlit/
+    ├── config.toml
     └── secrets.toml.example
 ```
 
@@ -144,8 +161,10 @@ Reinstall declared dependencies:
 If PowerShell blocks virtual-environment activation, use the full Python path
 shown above; activation is optional.
 
-The first use of free mode downloads the Hugging Face models and can take
-longer than later runs. CPU inference is supported but may be slow.
+The first free preparation downloads a pinned 4-bit Qwen model (about 1.1 GB)
+plus the embedding model. The files stay in the normal Hugging Face cache
+outside this repository and are reused later. CPU answers take longer than paid
+API answers, but no PDF text or question is sent to OpenAI in free mode.
 
 ## Security
 
@@ -153,6 +172,8 @@ longer than later runs. CPU inference is supported but may be slow.
 - Removing a key from the latest file does not remove it from older Git commits.
 - Review staged changes with `git diff --cached` before every push.
 - Avoid `git add .` when unexpected untracked files are present.
+- Before deploying paid mode publicly, add authentication, request limits, and
+  a spending cap so visitors cannot consume a shared server API key.
 
 ## License
 
